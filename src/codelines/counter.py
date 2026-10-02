@@ -1,20 +1,15 @@
 """Parallel line counter — counts lines in files using thread pools."""
 
 import os
-from collections import defaultdict, deque
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from rich.console import Console
-from rich.live import Live
-from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
-from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from codelines.config import CHUNK_SIZE, DEFAULT_WORKERS, LIVE_RECENT_MAX
-
-console = Console()
-
+from codelines.config import CHUNK_SIZE, DEFAULT_WORKERS
 
 def fast_count(file_path: Path) -> int:
     """Count newlines in a file using chunked binary reading.
@@ -27,10 +22,14 @@ def fast_count(file_path: Path) -> int:
     """
     try:
         with file_path.open("rb") as f:
-            return sum(
-                chunk.count(b"\n")
-                for chunk in iter(lambda: f.read(CHUNK_SIZE), b"")
-            )
+            lines = 0
+            last_byte = b""
+            for chunk in iter(lambda: f.read(CHUNK_SIZE), b""):
+                if b"\x00" in chunk:
+                    return 0
+                lines += chunk.count(b"\n")
+                last_byte = chunk[-1:]
+            return lines + int(bool(last_byte) and last_byte != b"\n")
     except (OSError, PermissionError, UnicodeError):
         return 0
 
@@ -38,7 +37,7 @@ def fast_count(file_path: Path) -> int:
 def count_lines(
     files: List[Path],
     workers: Optional[int] = None,
-    verbose: bool = True,
+    verbose: bool = False,
     progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> Tuple[int, Dict[str, int], Dict[str, int]]:
     """Count lines in a list of files using parallel workers.
@@ -64,57 +63,28 @@ def count_lines(
     if not files:
         return total, dict(ext_stats), dict(dir_stats)
 
-    if not verbose:
+    def run(progress=None, task=None) -> None:
+        nonlocal total
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(fast_count, f): f for f in files}
-            for future in as_completed(futures):
-                f = futures[future]
+            for completed, future in enumerate(as_completed(futures), start=1):
+                file = futures[future]
                 lines = future.result()
                 total += lines
                 if lines > 0:
-                    ext = f.suffix.lower() or "(no ext)"
-                    ext_stats[ext] += lines
-                    dir_stats[str(f.parent)] += lines
-
-        return total, dict(ext_stats), dict(dir_stats)
-
-    # Verbose mode with rich progress
-    last_files: deque[str] = deque(maxlen=LIVE_RECENT_MAX)
-
-    with Progress(
-        SpinnerColumn(),
-        BarColumn(),
-        TextColumn("{task.completed}/{task.total}"),
-        TimeElapsedColumn(),
-        console=console,
-    ) as progress:
-        task = progress.add_task("[green]Processing...", total=len(files))
-
-        with Live(console=console, refresh_per_second=10) as live:
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = {executor.submit(fast_count, f): f for f in files}
-
-                completed = 0
-                for future in as_completed(futures):
-                    f = futures[future]
-                    lines = future.result()
-                    total += lines
-                    completed += 1
-
-                    if lines > 0:
-                        ext = f.suffix.lower() or "(no ext)"
-                        ext_stats[ext] += lines
-                        dir_stats[str(f.parent)] += lines
-
-                    last_files.append(str(f))
+                    ext_stats[file.suffix.lower() or "(no ext)"] += lines
+                    dir_stats[str(file.parent)] += lines
+                if progress is not None:
                     progress.update(task, advance=1)
-                    if progress_callback:
-                        progress_callback(completed, len(files))
+                if progress_callback:
+                    progress_callback(completed, len(files))
 
-                    table = Table(title="Live Activity")
-                    table.add_column("Recent Files", style="cyan")
-                    for lf in last_files:
-                        table.add_row(lf[-80:])
-                    live.update(table)
+    if verbose:
+        with Progress(SpinnerColumn(), TextColumn("Counting {task.completed}/{task.total} files"),
+                      console=Console(stderr=True)) as progress:
+            task = progress.add_task("Counting", total=len(files))
+            run(progress, task)
+    else:
+        run()
 
     return total, dict(ext_stats), dict(dir_stats)

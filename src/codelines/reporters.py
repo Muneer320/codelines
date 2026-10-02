@@ -11,9 +11,10 @@ from rich.table import Table
 console = Console()
 
 
-def top_n(d: Dict[str, int], n: int = 5) -> List[Tuple[str, int]]:
-    """Return top N entries from a dict, sorted by value descending."""
-    return sorted(d.items(), key=lambda x: x[1], reverse=True)[:n]
+def top_n(d: Dict[str, int], n: int = 5, by_name: bool = False) -> List[Tuple[str, int]]:
+    """Return sorted entries, optionally capped at N."""
+    entries = sorted(d.items(), key=lambda x: x[0] if by_name else (-x[1], x[0]))
+    return entries[:n] if n >= 0 else entries
 
 
 def format_output(
@@ -104,7 +105,7 @@ def _format_table(
     summary.add_column("Metric", style="cyan")
     summary.add_column("Value", style="green")
     summary.add_row("Total Files (counted)", str(total_files))
-    summary.add_row("Total Lines (real code)", f"{total_lines:,}")
+    summary.add_row("Total Lines (including blanks and comments)", f"{total_lines:,}")
     summary.add_row("Workers", str(workers))
     summary.add_row("Skipped Directories", str(skipped_dirs))
     summary.add_row("Skipped Files", str(skipped_files))
@@ -112,12 +113,12 @@ def _format_table(
 
     # Extension stats
     if ext_stats:
-        ext_table = Table(title="Top File Types (Actual Code)", title_style="bold blue")
+        ext_table = Table(title="File Types", title_style="bold blue")
         ext_table.add_column("Extension", style="cyan")
         ext_table.add_column("Lines", style="green", justify="right")
         ext_table.add_column("%", style="dim", justify="right")
 
-        for k, v in top_n(ext_stats, top):
+        for k, v in top_n(ext_stats, top, by_name=sort_by == "ext"):
             pct = (v / total_lines * 100) if total_lines > 0 else 0
             ext_table.add_row(k, f"{v:,}", f"{pct:.1f}")
         console.print(ext_table)
@@ -129,7 +130,7 @@ def _format_table(
         dir_table.add_column("Lines", style="green", justify="right")
         dir_table.add_column("%", style="dim", justify="right")
 
-        for k, v in top_n(dir_stats, top):
+        for k, v in top_n(dir_stats, top, by_name=sort_by == "dir"):
             pct = (v / total_lines * 100) if total_lines > 0 else 0
             dir_table.add_row(k[-60:], f"{v:,}", f"{pct:.1f}")
         console.print(dir_table)
@@ -157,8 +158,8 @@ def _format_json(
             "skipped_directories": skipped_dirs,
             "skipped_files": skipped_files,
         },
-        "by_extension": dict(top_n(ext_stats, top)),
-        "by_directory": dict(top_n(dir_stats, top)),
+        "by_extension": dict(top_n(ext_stats, -1, by_name=sort_by == "ext")),
+        "by_directory": dict(top_n(dir_stats, -1, by_name=sort_by == "dir")),
     }
     return json.dumps(result, indent=2)
 
@@ -176,7 +177,7 @@ def _format_csv(
 ) -> str:
     """Render results as CSV."""
     buf = io.StringIO()
-    writer = csv.writer(buf)
+    writer = csv.writer(buf, lineterminator="\n")
 
     writer.writerow(["section", "key", "value"])
     writer.writerow(["summary", "total_files", total_files])
@@ -185,10 +186,10 @@ def _format_csv(
     writer.writerow(["summary", "skipped_directories", skipped_dirs])
     writer.writerow(["summary", "skipped_files", skipped_files])
 
-    for k, v in top_n(ext_stats, top):
+    for k, v in top_n(ext_stats, -1, by_name=sort_by == "ext"):
         writer.writerow(["by_extension", k, v])
 
-    for k, v in top_n(dir_stats, top):
+    for k, v in top_n(dir_stats, -1, by_name=sort_by == "dir"):
         writer.writerow(["by_directory", k, v])
 
     return buf.getvalue()

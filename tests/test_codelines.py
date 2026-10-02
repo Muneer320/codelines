@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from codelines.ignore import load_ignore_patterns, should_ignore
+from codelines.ignore import IgnoreMatcher, load_ignore_patterns, should_ignore
 from codelines.counter import fast_count, count_lines
 from codelines.scanner import collect_files
 from codelines.reporters import format_output, top_n
-from codelines.cli import build_parser
+from codelines.cli import build_parser, main
 
 
 # ── ignore tests ──────────────────────────────────────────────────────
@@ -60,7 +60,7 @@ class TestCounter:
     def test_fast_count_no_newline_eof(self, tmp_path: Path):
         f = tmp_path / "noeol.py"
         f.write_text("line1\nline2")  # no trailing newline
-        assert fast_count(f) == 1  # only one \n
+        assert fast_count(f) == 2  # the final unterminated line counts
 
     def test_fast_count_binary_file(self, tmp_path: Path):
         f = tmp_path / "binary.bin"
@@ -154,6 +154,33 @@ class TestScanner:
 
         assert len(files) == 2  # only foo.py and bar.py (depth 1 and 2)
 
+    def test_depth_is_same_with_progress_and_quiet(self, tmp_path: Path):
+        (tmp_path / "one").mkdir()
+        (tmp_path / "one" / "two").mkdir()
+        for file in (tmp_path / "root.py", tmp_path / "one" / "first.py",
+                     tmp_path / "one" / "two" / "second.py"):
+            file.write_text("x")
+        quiet = collect_files(tmp_path, IgnoreMatcher(tmp_path), max_depth=1, verbose=False)[0]
+        shown = collect_files(tmp_path, IgnoreMatcher(tmp_path), max_depth=1, verbose=True)[0]
+        assert {f.name for f in quiet} == {f.name for f in shown} == {"root.py", "first.py"}
+
+    def test_nested_ignores_defaults_and_filenames(self, tmp_path: Path):
+        (tmp_path / ".gitignore").write_text("*.py\n/root-only.md\n")
+        (tmp_path / "root-only.md").write_text("x")
+        (tmp_path / "child").mkdir()
+        (tmp_path / "child" / ".gitignore").write_text("!keep.py\n")
+        (tmp_path / "child" / "keep.py").write_text("x")
+        (tmp_path / "child" / "drop.py").write_text("x")
+        (tmp_path / "child" / "other.md").write_text("x")
+        (tmp_path / "Dockerfile").write_text("FROM scratch")
+        (tmp_path / "Makefile").write_text("all:")
+        (tmp_path / "node_modules").mkdir()
+        (tmp_path / "node_modules" / "lib.js").write_text("x")
+        files, _, _ = collect_files(tmp_path, IgnoreMatcher(tmp_path))
+        assert {f.name for f in files} == {"keep.py", "other.md", "Dockerfile", "Makefile"}
+        all_files, _, _ = collect_files(tmp_path, IgnoreMatcher(tmp_path, defaults=False))
+        assert "lib.js" in {f.name for f in all_files}
+
 
 # ── reporters tests ───────────────────────────────────────────────────
 
@@ -210,6 +237,24 @@ class TestReporters:
         # Table format prints to console, returns empty string
         assert output == ""
 
+    @pytest.mark.parametrize("fmt", ["json", "csv"])
+    def test_machine_formats_include_all_rows(self, fmt):
+        output = format_output(fmt=fmt, total_lines=6, total_files=3, workers=2,
+                               skipped_dirs=0, skipped_files=0,
+                               ext_stats={".a": 1, ".b": 2, ".c": 3},
+                               dir_stats={"a": 1, "b": 2, "c": 3}, top=1, sort_by="ext")
+        assert all(ext in output for ext in (".a", ".b", ".c"))
+        if fmt == "json":
+            assert list(json.loads(output)["by_extension"]) == [".a", ".b", ".c"]
+
+    def test_sort_options(self):
+        kwargs = dict(fmt="json", total_lines=9, total_files=3, workers=2,
+                      skipped_dirs=0, skipped_files=0,
+                      ext_stats={".z": 8, ".a": 1}, dir_stats={"z": 8, "a": 1}, top=1)
+        assert list(json.loads(format_output(**kwargs, sort_by="lines"))["by_extension"]) == [".z", ".a"]
+        assert list(json.loads(format_output(**kwargs, sort_by="ext"))["by_extension"]) == [".a", ".z"]
+        assert list(json.loads(format_output(**kwargs, sort_by="dir"))["by_directory"]) == ["a", "z"]
+
 
 # ── CLI tests ─────────────────────────────────────────────────────────
 
@@ -244,3 +289,22 @@ class TestCLI:
         parser = build_parser()
         with pytest.raises(SystemExit):
             parser.parse_args(["--version"])
+
+    @pytest.mark.parametrize("fmt", ["json", "csv"])
+    def test_machine_stdout_has_no_banner_or_wrapping(self, tmp_path: Path, capsys, fmt):
+        nested = tmp_path / ("long-[brackets]-" * 8)
+        nested.mkdir()
+        (nested / "example.py").write_text("one\ntwo")
+        assert main([str(tmp_path), "--format", fmt]) == 0
+        output = capsys.readouterr().out
+        assert "FAST LOC SCANNER" not in output
+        if fmt == "json":
+            data = json.loads(output)
+            assert data["summary"]["total_lines"] == 2
+            assert str(nested) in data["by_directory"]
+        else:
+            assert str(nested) in output
+
+    def test_empty_json_is_valid(self, tmp_path: Path, capsys):
+        assert main([str(tmp_path), "--format", "json"]) == 0
+        assert json.loads(capsys.readouterr().out)["summary"]["total_files"] == 0

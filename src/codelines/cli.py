@@ -9,8 +9,8 @@ from rich.console import Console
 
 from codelines import __version__
 from codelines.config import DEFAULT_TOP_N, DEFAULT_WORKERS
-from codelines.ignore import load_ignore_patterns
-from codelines.scanner import collect_files
+from codelines.ignore import IgnoreMatcher
+from codelines.scanner import CODE_FILENAMES, collect_files
 from codelines.counter import count_lines
 from codelines.reporters import format_output
 
@@ -90,6 +90,11 @@ Examples:
     )
 
     parser.add_argument(
+        "--no-default-ignores", action="store_true",
+        help="Scan dependency and build directories unless ignored by a file",
+    )
+
+    parser.add_argument(
         "--sort-by", "-s",
         choices=["ext", "dir", "lines"],
         default="lines",
@@ -134,38 +139,46 @@ def main(args: Optional[list] = None) -> int:
     # Validate directory
     folder = Path(opts.directory).resolve()
     if not folder.is_dir():
-        console.print(f"[red]Error:[/red] '{opts.directory}' is not a valid directory")
+        print(f"Error: '{opts.directory}' is not a valid directory", file=sys.stderr)
+        return 1
+    if opts.workers < 1 or opts.top < 1 or (opts.max_depth is not None and opts.max_depth < 0):
+        print("Error: workers and top must be positive; max-depth must be nonnegative", file=sys.stderr)
         return 1
 
     # Normalize extensions (add leading dot if missing)
+    def normalized(value: str) -> str:
+        value = value.lower()
+        return value if value in CODE_FILENAMES or value.startswith(".") else f".{value}"
+
     include_exts = None
     if opts.include:
-        include_exts = {ext if ext.startswith(".") else f".{ext}" for ext in opts.include}
+        include_exts = {normalized(ext) for ext in opts.include}
 
     exclude_exts = None
     if opts.exclude:
-        exclude_exts = {ext if ext.startswith(".") else f".{ext}" for ext in opts.exclude}
+        exclude_exts = {normalized(ext) for ext in opts.exclude}
 
     # Load ignore patterns
-    ignore_patterns: set = set()
-    ignore_patterns |= load_ignore_patterns(folder / ".gitignore")
-    ignore_patterns |= load_ignore_patterns(folder / ".ignore")
+    extra = None
     if opts.ignore_file:
         extra = Path(opts.ignore_file)
         if not extra.is_absolute():
             extra = folder / extra
-        ignore_patterns |= load_ignore_patterns(extra)
+        if not extra.is_file():
+            print(f"Error: ignore file does not exist: {extra}", file=sys.stderr)
+            return 1
+    ignore_patterns = IgnoreMatcher(folder, defaults=not opts.no_default_ignores, extra_file=extra)
 
     verbose = not opts.quiet and opts.format == "table"
 
-    if not opts.quiet:
-        console.rule("[bold blue]⚡ FAST LOC SCANNER ⚡")
-        console.print(f"[bold green][START][/bold green] Scanning: {folder}")
+    if verbose:
+        console.rule("[bold blue]codelines")
+        console.print(f"Scanning: {folder}")
         if include_exts:
             console.print(f"[dim]Including only: {', '.join(sorted(include_exts))}[/dim]")
         if exclude_exts:
             console.print(f"[dim]Excluding: {', '.join(sorted(exclude_exts))}[/dim]")
-        if opts.max_depth:
+        if opts.max_depth is not None:
             console.print(f"[dim]Max depth: {opts.max_depth}[/dim]")
         console.print()
 
@@ -179,7 +192,7 @@ def main(args: Optional[list] = None) -> int:
         verbose=verbose,
     )
 
-    if not opts.quiet:
+    if verbose:
         console.print(f"[green][FILES][/green] {len(files)} collected")
         console.print(f"[red][SKIPPED DIRS][/red] {len(skipped_dirs)}")
         console.print(f"[red][SKIPPED FILES][/red] {skipped_files}")
@@ -191,11 +204,9 @@ def main(args: Optional[list] = None) -> int:
                 console.print(f"   [dim]... and {len(skipped_dirs) - 10} more[/dim]")
         console.print()
 
-    if not files:
+    if verbose and not files:
         console.print("[yellow]No files found to count.[/yellow]")
-        return 0
-
-    if not opts.quiet:
+    if verbose and files:
         console.print(f"[magenta][THREADS][/magenta] Using {opts.workers} workers")
         console.print()
 
@@ -221,9 +232,13 @@ def main(args: Optional[list] = None) -> int:
     )
 
     if output:
-        console.print(output)
+        if opts.format in {"json", "csv"} and hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        sys.stdout.write(output)
+        if not output.endswith("\n"):
+            sys.stdout.write("\n")
 
-    if not opts.quiet:
+    if verbose:
         console.rule("[bold green]DONE")
 
     return 0

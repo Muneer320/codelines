@@ -1,6 +1,6 @@
-"""codelines — A blazing-fast, parallel Lines of Code counter."""
+"""codelines — a parallel physical line counter."""
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 __author__ = "Muneer Alam"
 __license__ = "MIT"
 
