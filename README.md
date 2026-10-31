@@ -29,7 +29,7 @@ When you open an unfamiliar repository, it helps to know how its source is distr
 
 ## Install and count
 
-Requires Python 3.9+. CI checks Python 3.9 and 3.13 on Linux and Windows.
+Requires Python 3.9+. CI checks Python 3.9 and 3.13 on Ubuntu 24.04 and Windows.
 
 ```sh
 python -m pip install codelines
